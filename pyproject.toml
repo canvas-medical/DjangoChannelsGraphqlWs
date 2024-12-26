@@ -57,7 +57,7 @@ Django = ">=4"
 graphene = "^2.1"
 graphql-core = ">=2.2"
 msgpack = ">=0.6.1, <2"
-yarl = "1.8.2"
+yarl = ">=1.18"
 [tool.poetry.dev-dependencies]
 # Development dependencies.
 # Version syntax: https://python-poetry.org/docs/dependency-specification/
