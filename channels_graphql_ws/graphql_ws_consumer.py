@@ -46,7 +46,7 @@ import logging
 import traceback
 import types
 import weakref
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Generator, List, Optional, Sequence
 
 import asgiref.sync
 import channels.generic.websocket as ch_websocket
@@ -66,6 +66,14 @@ LOG = logging.getLogger(__name__)
 
 # WebSocket subprotocol used for the GraphQL.
 GRAPHQL_WS_SUBPROTOCOL = "graphql-ws"
+
+@staticmethod
+def _task_generator(task_or_coro_list: List[Any]) -> List[Any]:
+    """Util to return a list of asyncio tasks from a list that may
+    contain coroutines.
+    """
+    return [asyncio.create_task(f) if asyncio.iscoroutine(f) else f
+        for f in task_or_coro_list]
 
 
 class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
@@ -262,7 +270,9 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
 
         # Unsubscribe from the Channels groups.
         waitlist += [
-            self._channel_layer.group_discard(group, self.channel_name)
+            asyncio.create_task(
+                self._channel_layer.group_discard(group, self.channel_name)
+                )
             for group in self._sids_by_group
         ]
 
@@ -277,7 +287,7 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
             waitlist += [self._keepalive_task]
 
         if waitlist:
-            await asyncio.wait(waitlist)
+            await asyncio.wait(_task_generator(waitlist))
 
         self._subscriptions.clear()
         self._sids_by_group.clear()
@@ -456,7 +466,7 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
         # unsubscription.
         await asyncio.wait(
             [
-                self.receive_json({"type": "stop", "id": sid})
+                asyncio.create_task(self.receive_json({"type": "stop", "id": sid}))
                 for sid in self._sids_by_group[group]
             ]
         )
@@ -764,7 +774,7 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
             notifier_task=notifier_task,
         )
 
-        await asyncio.wait(waitlist)
+        await asyncio.wait(_task_generator(waitlist))
 
         return stream
 
@@ -811,7 +821,8 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
                 waitlist.append(
                     self._channel_layer.group_discard(group, self.channel_name)
                 )
-        await asyncio.wait(waitlist)
+
+        await asyncio.wait(_task_generator(waitlist))
 
         # Call the subscription class `unsubscribed` handler in a worker
         # thread, cause it may invoke long-running synchronous tasks.
