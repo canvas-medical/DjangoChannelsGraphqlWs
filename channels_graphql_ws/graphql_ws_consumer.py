@@ -48,7 +48,6 @@ import types
 import weakref
 from typing import Any, Callable, Dict, Generator, List, Optional, Sequence
 
-import asgiref.sync
 import channels.generic.websocket as ch_websocket
 import django.core.serializers
 import django.db
@@ -570,12 +569,10 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
 
             # The `register` will be called from the worker thread
             # (spawned for a GraphQL processing) when a client
-            # subscribes. So we "synchronize" it with `async_to_sync`.
-            # NOTE: It is important to invoke `async_to_sync` in the
-            # thread with the eventloop which serves this consumer. This
-            # assures that IO operations is performed within a single
-            # eventloop.
-            register_subscription = asgiref.sync.async_to_sync(
+            # subscribes. So we run it on the eventloop which serves
+            # this consumer, which assures that IO operations are
+            # performed within a single eventloop.
+            register_subscription = self._on_eventloop(
                 functools.partial(self._register_subscription, operation_id)
             )
 
@@ -663,10 +660,9 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
                 # Subscribe to the observable.
                 # NOTE: The function `on_next` is called from a
                 # threadpool which processes all GraphQL requests. So we
-                # wrap `_send_gql_data` into `async_to_sync` here, so
-                # eventually `_send_gql_data` will be invoked from the
-                # current eventloop.
-                send_gql_data = asgiref.sync.async_to_sync(self._send_gql_data)
+                # run `_send_gql_data` on the eventloop which serves
+                # this consumer.
+                send_gql_data = self._on_eventloop(self._send_gql_data)
                 result.subscribe(
                     lambda r: send_gql_data(operation_id, r.data, r.errors)
                 )
@@ -998,6 +994,32 @@ class GraphqlWsConsumer(ch_websocket.AsyncJsonWebsocketConsumer):
             " function must be called from the thread where the"
             " eventloop serving the consumer is running."
         )
+
+    def _on_eventloop(self, coroutine_function):
+        """Wrap `coroutine_function` to run on the consumer's eventloop.
+
+        The wrapper is called from the worker threads which process
+        GraphQL requests. Each call schedules the coroutine on the
+        eventloop serving this consumer and blocks until it finishes.
+        The eventloop is the one stored on the consumer, so it does not
+        depend on which eventloop the calling thread has set.
+
+        Args:
+            coroutine_function: The coroutine function to wrap.
+
+        Returns:
+            A regular function running `coroutine_function` on the
+            consumer's eventloop and returning its result.
+
+        """
+        eventloop = self._eventloop
+
+        def run_on_eventloop(*args, **kwds):
+            return asyncio.run_coroutine_threadsafe(
+                coroutine_function(*args, **kwds), eventloop
+            ).result()
+
+        return run_on_eventloop
 
     def _spawn_background_task(self, awaitable):
         """Spawn background task.
